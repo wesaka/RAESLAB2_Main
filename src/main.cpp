@@ -1,25 +1,38 @@
 #include <Arduino.h>
-#include <SPI.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Servo.h>
+#include <TinyMPU6050.h>
 
-#include "BasicStepperDriver.h"
-#include "robot_functions.h"
-#include "info_functions.h"
+/*
+ * Encoder variables
+ */
+
+#define ENCODER_DT 51
+#define ENCODER_CLK 50
+
+/*
+ * DC Motor Variables
+**/
+
+#define M_SPEED 7
+#define M_AIN1 49
+#define M_AIN2 48
+#define M_STBY 47
+
 
 /*
  * Global Variables
 **/
+int lastCounter = 0;
 
-unsigned long myTime;
-int secondCount = 0;
-
-bool clicked = false;
-int clickCount = 0;
-
+int currentStateCLK;
+int lastStateCLK;
 int infoMode = 0;
+
+/*
+ * Timekeeping
+**/
+unsigned long timeForRPM = millis();
 
 /*
  * Menu values
@@ -42,24 +55,37 @@ int infoMode = 0;
 
 #define SPACE "   "
 
-int menuValue = 100;
+int menuValue = ROOT;
 int menuSelection = 0;
 String menuString;
 String menuOptions;
 
 /*
+ * Encoder variables
+ */
+
+#define ENCODER_DT 51
+#define ENCODER_CLK 50
+
+int encoderCounter = 0; // Just to keep in mind that one revolution is approx 30 "counts"
+
+/*
  * DC Motor Variables
 **/
 
-#define M_SPEED 2
-#define M_AIN1 16
-#define M_AIN2 17
-//#define M_STBY 49
+#define M_SPEED 7
+#define M_AIN1 49
+#define M_AIN2 48
+#define M_STBY 47
 
+bool isAuto = false;
 bool isCW = true;
 
+double odometer = 0.0;
 int speed = 1;
-bool si = true;
+bool isIncreasing = true;
+
+unsigned long currentRPM;
 
 /*
  * OLED Variables
@@ -76,12 +102,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
  **/
 int JOY_X = A8;
 int JOY_Y = A9;
-
-int read_x;
-int read_y;
-
-bool joyManual = false;
-bool serialManual = false;
 
 /*
  * Buttons variables
@@ -117,19 +137,19 @@ void menuForward() {
                         menuValue = 100 + selection + SPEEDOMETER;
                         break;
 
-                    // Odometer
+                        // Odometer
                     case 1:
                         menuString = "Odometer";
                         menuValue = 100 + selection + ODOMETER;
                         break;
 
-                    // Orientation
+                        // Orientation
                     case 2:
                         menuString = "Orientation";
                         menuValue = 100 + selection + ORIENTATION;
                         break;
 
-                    // Current Location
+                        // Current Location
                     case 3:
                         menuString = "Current Location";
                         menuValue = 100 + selection + CURRENT_LOCATION;
@@ -145,25 +165,25 @@ void menuForward() {
                         menuValue = 100 + selection + SPEEDOMETER;
                         break;
 
-                    // Odometer
+                        // Odometer
                     case 1:
                         menuString = "Odometer";
                         menuValue = 100 + selection + SPEEDOMETER;
                         break;
 
-                    // Orientation
+                        // Orientation
                     case 2:
                         menuString = "Orientation";
                         menuValue = 100 + selection + ORIENTATION;
                         break;
 
-                    // Current Location
+                        // Current Location
                     case 3:
                         menuString = "Current Location";
                         menuValue = 100 + selection + CURRENT_LOCATION;
                         break;
 
-                    // Remote Control Message
+                        // Remote Control Message
                     case 4:
                         menuString = "Remote Control Message";
                         menuValue = 100 + selection + REMOTE_CONTROL_MESSAGE;
@@ -179,7 +199,7 @@ void menuForward() {
                         menuValue = 100 + selection + WHEEL_DIAMETER;
                         break;
 
-                    // Distance between two wheels
+                        // Distance between two wheels
                     case 1:
                         menuString = "Distance Between Two Wheels";
                         menuValue = 100 + selection + DISTANCE_BETWEEN_WHEELS;
@@ -198,7 +218,7 @@ void menuBack() {
     int level = menuValue % 100;
     if (level > 0) {
         if (level % 10 > 0) {
-            menuValue = 100 + ((level/10) * 10);
+            menuValue = 100 + ((level / 10) * 10);
         } else {
             menuValue = 100;
         }
@@ -211,35 +231,91 @@ void menuBack() {
     infoMode = 0;
 }
 
-void handleDCMotor() {
-    if (joyManual) {
-        // Handle the increase in speed manually
-        speed = deadzoneMap(read_x, 0, 1023, -255, 255);
+/*
+ *  Constructing MPU-6050
+ */
+MPU6050 mpu(Wire);
 
-        // Serial.print("Increasing speed manually. Current speed: ");
-        // Serial.println(speed);
+void getRPM() {
+    /*
+     * To calculate the RPM I'll use 1 revolution of the wheel, that is approx 30 in the "encoderCounter"
+     * Since every 30 the wheel does one revolution, but that's not exact :/
+     */
 
-        if (speed < 0) {
-            isCW = false;
-            speed *= -1;
+    Serial.println(encoderCounter);
+
+    int counterResult;
+
+    if (encoderCounter > lastCounter) {
+        counterResult = encoderCounter - lastCounter;
+    } else {
+        counterResult = lastCounter - encoderCounter;
+    }
+
+    if (counterResult >= 30) {
+        // 1 revolution have passed
+        lastCounter = encoderCounter;
+
+        // Add it to the odometer
+        odometer += 0.215;
+
+        // Get the time it took
+        unsigned long elapsedTime = millis() - timeForRPM;
+
+        timeForRPM = millis();
+
+        currentRPM = (1 * (60000 / elapsedTime));
+    }
+}
+
+double getSpeed() {
+    // Returns in meters/hour
+    return (0.215 * (float) currentRPM) * 60;
+}
+
+double getOdometer() {
+    return odometer; // Returns in total meters traveled
+}
+
+void getEncoderCount() {
+// Read the current state of CLK
+    currentStateCLK = digitalRead(ENCODER_CLK);
+
+    // If last and current state of CLK are different, then pulse occurred
+    // React to only 1 state change to avoid double count
+    if (currentStateCLK != lastStateCLK && currentStateCLK == 1) {
+
+        // If the DT state is different than the CLK state then
+        // the encoder is rotating CCW so decrement
+        if (digitalRead(ENCODER_DT) != currentStateCLK) {
+            encoderCounter--;
+
         } else {
-            isCW = true;
-        }
-    } else if (!serialManual) {
-        // Handle the increase in speed automatically
-        int speedStep = si ? 1 : -1;
-        speed += speedStep;
+            // Encoder is rotating CW so increment
+            encoderCounter++;
 
-        if (speed > 255) {
-            speed = 255;
-            si = false;
         }
+    }
 
-        if (speed < 0) {
-            speed = 0;
-            si = true;
-            isCW = !isCW;
-        }
+    // Remember last CLK state
+    lastStateCLK = currentStateCLK;
+}
+
+void autoMotor() {
+    // Handle the increase in speed automatically
+    int speedStep = isIncreasing ? 1 : -1;
+    speed += speedStep;
+
+    if (speed > 255) {
+        speed = 255;
+        isIncreasing = false;
+        isCW = false;
+    }
+
+    if (speed < 50) {
+        speed = 50;
+        isIncreasing = true;
+        isCW = true;
     }
 
     if (isCW) {
@@ -251,6 +327,9 @@ void handleDCMotor() {
     }
 
     analogWrite(M_SPEED, speed);
+
+//    Serial.print("Current speed: ");
+//    Serial.println(speed);
 }
 
 void handleMenu() {
@@ -268,7 +347,7 @@ void handleMenu() {
     menuOptions.concat(SPACE);
     menuOptions.concat("System Info");
 
-    if(remainder > 0 && remainder % 10 == 0) {
+    if (remainder > 0 && remainder % 10 == 0) {
         // Second level of the menu
         switch (remainder) {
             case AUTORUN:
@@ -335,7 +414,7 @@ void handleMenuSelection() {
 
     // Go down on menu
     if (digitalRead(B_DOWN) == LOW) {
-        int selection = (((menuValue % 100)/10)*10);
+        int selection = (((menuValue % 100) / 10) * 10);
 
         // Default value for root menu
         int maxValue = 2;
@@ -379,17 +458,31 @@ void handleOLED() {
     if (infoMode == 1) {
         // Clear the canvas
         display.fillRect(0, selectLine(3), SCREEN_WIDTH, SCREEN_HEIGHT - selectLine(3), SSD1306_BLACK);
+        display.setCursor(0, selectLine(3));
 
         // Show the information of the desired mode
+//        Serial.print("Showing info - mode ");
+//        Serial.println(menuValue % 10);
         switch (menuValue % 10) {
             case SPEEDOMETER:
-                // TODO call functions and show the return value
+                display.print(getSpeed());
+                display.println(" meters per hour.");
                 break;
 
             case ODOMETER:
+                display.print(getOdometer());
+                display.println(" meters traveled.");
                 break;
 
-            case CURRENT_LOCATION:
+            case ORIENTATION:
+                //IMU checking
+                mpu.Execute();
+                display.print("X: ");
+                display.println(mpu.GetAngX());
+                display.print("Y: ");
+                display.println(mpu.GetAngY());
+                display.print("Z: ");
+                display.println(mpu.GetAngZ());
                 break;
 
             case REMOTE_CONTROL_MESSAGE:
@@ -404,136 +497,118 @@ void handleOLED() {
     }
 }
 
-void checkJoySwitch() {
-//    if ((digitalRead(B_1) == LOW) && (clicked == false)) {
-//        joyManual = !joyManual;
-//        serialManual = false;
-//        Serial.println("Setting joyManual");
-//        clicked = true;
-//    }
-}
-
-void handleJoystick() {
-    // Downwards smaller, upwards bigger
-    read_x = analogRead(JOY_X);
-
-    // Y goes from approx 20 to 950
-    // Left smaller, right bigger
-    read_y = analogRead(JOY_Y);
-
-    // Serial.print("Joy X: ");
-    // Serial.print(read_x);
-    // Serial.print(" Joy Y: ");
-    // Serial.println(read_y);
-}
-
+/**
+ * This is useful for both outputting messages in the serial monitor
+ * And for getting input from there
+ * We can use it for controlling the menus
+ * For now, just the speedometer, odometer and orientation information are available
+ *
+ * Input in the serial monitor:
+ * a: for automatic - increases and decreases speed automatically
+ * m: for manual - still have to implement it
+ *
+ * s: for seeing the speed in the OLED
+ * o: for seeing odometer in OLED
+ * r: to see orientation stats in OLED
+ * i: to get that information in serial monitor
+ */
 void handleSerialComm() {
-    /**
-     * This is the main function that regulates the Serial Communication
-     * What keywords does the program understand?
-     *
-     * auto|manual - The same behavior as the joystick button push, setting either auto or manual
-     * leds on  - Turns all leds on at full brightness
-     * leds off - Turns off all leds
-     * leds dim - The deafult behavior that the leds goes to full brightness and dim in different intervals
-     * dc (speed - from -255 to 255) - The same behavior as the joy x on manual
-     * stepper (degrees) - How mnay degrees you want the stepper to go
-     * servo (x) (y) - x and y are the angles from 0 to 180 that the servos must assume
-     **/
+    /*
+     * This used for inputting data from serial
+     * Use with Serial.readString()
+     * inputString.startsWith("whatever")
+     */
+    char inputChar;
 
-    String comm;
+    if (Serial.available() > 0) {
+        inputChar = Serial.read();
 
-    if (Serial.available()) {
-        comm = Serial.readString();
 
-        if (comm.startsWith("auto")) {
-            joyManual = false;
-            serialManual = false;
+        //inputString = Serial.readString();
+        if (inputChar == 's') {
+            infoMode = 1;
+            menuValue = 111;
+        } else if (inputChar == 'o') {
+            infoMode = 1;
+            menuValue = 112;
+        } else if (inputChar == 'r') {
+            infoMode = 1;
+            menuValue = 113;
+        } else if (inputChar == 'm') {
+            Serial.println("Changing to manual control mode.");
+            isAuto = false;
+        } else if (inputChar == 'a') {
+            Serial.println("Changing to auto control mode.");
+            isAuto = true;
+        } else if (inputChar == 'i') {
+            Serial.print("Current RPM: ");
+            Serial.print(currentRPM);
+            Serial.print(" | Current PWM: ");
+            Serial.print(speed);
+            Serial.print(" | Current speed (meters/minute): ");
+            Serial.print(getSpeed());
+            Serial.print(" | Current odometer reading :");
+            Serial.println(getOdometer());
 
-        } else if (comm.startsWith("manual")) {
-            joyManual = false;
-            serialManual = true;
-
-        } else if (comm.startsWith("leds")) {
-            Serial.println("Leds serial called");
-            String option = comm.substring(5, 7);
-
-        } else if (comm.startsWith("dc")) {
-            String stringSpeed = comm.substring(3);
-            int serialSpeed = stringSpeed.toInt();
-
-            if (serialSpeed < 0) {
-                isCW = false;
-                speed = serialSpeed * -1;
-            } else {
-                isCW = true;
-                speed = serialSpeed;
-            }
-
-        } else if (comm.startsWith("stepper")) {
-            String stringAngle = comm.substring(8);
-            int angle = stringAngle.toInt();
-
-        } else if (comm.startsWith("servo")) {
-            String xyValues = comm.substring(6);
-            int serialX = xyValues.substring(0, xyValues.indexOf(" ")).toInt();;
-            int serialY = xyValues.substring(xyValues.indexOf("")).toInt();
-        } else if (comm.startsWith("oled")) {
-            Serial.print("LED0 Brightness: ");
-
-            Serial.print("Dir: ");
-            Serial.print(isCW ? "CW" : "CCW");
-            Serial.print(" | Spd: ");
-            Serial.println(speed);
-            Serial.println("");
-
-            Serial.print("Step Pos (Deg): ");
-            Serial.println("");
-        } else {
-            Serial.println("Command not recognized. Try again.");
+            //IMU checking
+            Serial.print("[");
+            mpu.Execute();
+            Serial.print(mpu.GetAngX());
+            Serial.print("  ");
+            Serial.print(mpu.GetAngY());
+            Serial.print("  ");
+            Serial.print(mpu.GetAngZ());
+            Serial.println("]");
         }
     }
 }
 
+unsigned long hundredMillis = millis();
+unsigned long oneMillis = millis();
+
 void handleAsync() {
-    unsigned long timeUpdated = millis();
+    if (millis() > oneMillis + 1) {
+        oneMillis = millis();
+
+        getEncoderCount();
+        getRPM();
+    }
 
 
-    if (timeUpdated > myTime + 100) {
+    if (millis() > hundredMillis + 100) {
         // Reset the global time variable to reflect now
-        myTime = timeUpdated;
-        //Serial.println(myTime);
+        hundredMillis = millis();
+        //Serial.println(hundredMillis);
 
         // Handlers
-        checkJoySwitch();
-        handleJoystick();
-        handleDCMotor();
+        if (isAuto) autoMotor();
         handleMenu();
         handleMenuSelection();
         handleOLED();
         handleSerialComm();
-
-        if (clicked) {
-            clickCount++;
-            if (clickCount >= 3) {
-                clicked = false;
-                clickCount = 0;
-            }
-        }
     }
 }
 
 void setup() {
     Serial.begin(9600);
 
+// Set encoder pins as inputs
+    pinMode(ENCODER_CLK, INPUT);
+    pinMode(ENCODER_DT, INPUT);
+
+    // Set up motor pins
     pinMode(M_SPEED, OUTPUT);
     pinMode(M_AIN1, OUTPUT);
     pinMode(M_AIN2, OUTPUT);
-//  pinMode(M_STBY, OUTPUT);
+    pinMode(M_STBY, OUTPUT);
+    digitalWrite(M_STBY, HIGH);
 
-    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    // Read the initial state of CLK
+    lastStateCLK = digitalRead(ENCODER_CLK);
+
+    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
         Serial.println(F("SSD1306 allocation failed"));
-        for(;;); // Don't proceed, loop forever
+        for (;;); // Don't proceed, loop forever
     }
 
     // Joystick switch needs to have pullup
@@ -544,8 +619,11 @@ void setup() {
     pinMode(B_DOWN, INPUT_PULLUP);
     pinMode(B_RIGHT, INPUT_PULLUP);
     pinMode(B_LEFT, INPUT_PULLUP);
+    pinMode(JOY_Y, INPUT);
     pinMode(JOY_X, INPUT);
-    pinMode(JOY_X, INPUT);
+
+    // IMU init
+    mpu.Initialize();
 }
 
 void loop() {
