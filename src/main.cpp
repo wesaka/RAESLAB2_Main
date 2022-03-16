@@ -115,15 +115,35 @@ int JOY_Y = A9;
 #define B_RIGHT 58
 
 /*
+ * Function declarations
+ */
+
+void menuForward();
+void menuBack();
+
+void getRPM();
+double getSpeed();
+double getOdometer();
+void getEncoderCount();
+
+void handleMenuInformation();
+void handleMenuSelection();
+void processSelection(int);
+void handleOLED();
+void handleSerialComm();
+void handleAsync();
+
+/*
  * General functions
  */
 int selectLine(int line) { return line * 8; }
+
 
 void menuForward() {
     int selection = menuValue % 100;
     if (selection == 0) {
         // We are in the root
-        menuValue += ((menuSelection + 1) * 10);
+        processSelection(100 + ((menuSelection + 1) * 10));
     } else {
         // We are in the second menu
         // Figure out what are the options
@@ -133,26 +153,22 @@ void menuForward() {
                 switch (menuSelection) {
                     // Speedometer
                     case 0:
-                        menuString = "Speedometer";
-                        menuValue = 100 + selection + SPEEDOMETER;
+                        processSelection(100 + selection + SPEEDOMETER);
                         break;
 
                         // Odometer
                     case 1:
-                        menuString = "Odometer";
-                        menuValue = 100 + selection + ODOMETER;
+                        processSelection(100 + selection + ODOMETER);
                         break;
 
                         // Orientation
                     case 2:
-                        menuString = "Orientation";
-                        menuValue = 100 + selection + ORIENTATION;
+                                                processSelection(100 + selection + ORIENTATION);
                         break;
 
                         // Current Location
                     case 3:
-                        menuString = "Current Location";
-                        menuValue = 100 + selection + CURRENT_LOCATION;
+                                                processSelection(100 + selection + CURRENT_LOCATION);
                         break;
                 }
                 break;
@@ -161,32 +177,27 @@ void menuForward() {
                 switch (menuSelection) {
                     // Speedometer
                     case 0:
-                        menuString = "Speedometer";
-                        menuValue = 100 + selection + SPEEDOMETER;
+                                                processSelection(100 + selection + SPEEDOMETER);
                         break;
 
                         // Odometer
                     case 1:
-                        menuString = "Odometer";
-                        menuValue = 100 + selection + SPEEDOMETER;
+                                                processSelection(100 + selection + ODOMETER);
                         break;
 
                         // Orientation
                     case 2:
-                        menuString = "Orientation";
-                        menuValue = 100 + selection + ORIENTATION;
+                                                processSelection(100 + selection + ORIENTATION);
                         break;
 
                         // Current Location
                     case 3:
-                        menuString = "Current Location";
-                        menuValue = 100 + selection + CURRENT_LOCATION;
+                                                processSelection(100 + selection + CURRENT_LOCATION);
                         break;
 
                         // Remote Control Message
                     case 4:
-                        menuString = "Remote Control Message";
-                        menuValue = 100 + selection + REMOTE_CONTROL_MESSAGE;
+                                                processSelection(100 + selection + REMOTE_CONTROL_MESSAGE);
                         break;
                 }
                 break;
@@ -195,14 +206,12 @@ void menuForward() {
                 switch (menuSelection) {
                     // Wheel Diameter
                     case 0:
-                        menuString = "Wheel Diameter";
-                        menuValue = 100 + selection + WHEEL_DIAMETER;
+                                                processSelection(100 + selection + WHEEL_DIAMETER);
                         break;
 
                         // Distance between two wheels
                     case 1:
-                        menuString = "Distance Between Two Wheels";
-                        menuValue = 100 + selection + DISTANCE_BETWEEN_WHEELS;
+                                                processSelection(100 + selection + DISTANCE_BETWEEN_WHEELS);
                         break;
                 }
                 break;
@@ -218,9 +227,9 @@ void menuBack() {
     int level = menuValue % 100;
     if (level > 0) {
         if (level % 10 > 0) {
-            menuValue = 100 + ((level / 10) * 10);
+            processSelection(100 + ((level / 10) * 10));
         } else {
-            menuValue = 100;
+            processSelection(100);
         }
 
         // Don't forget to reset the cursor
@@ -332,7 +341,7 @@ void autoMotor() {
 //    Serial.println(speed);
 }
 
-void handleMenu() {
+void handleMenuInformation() {
     display.setCursor(0, 0);     // Start at top-left corner
 
     // Get where in the menu tree we are
@@ -347,7 +356,7 @@ void handleMenu() {
     menuOptions.concat(SPACE);
     menuOptions.concat("System Info");
 
-    if (remainder > 0 && remainder % 10 == 0) {
+    if (menuValue > 100 && remainder % 10 == 0) {
         // Second level of the menu
         switch (remainder) {
             case AUTORUN:
@@ -385,13 +394,52 @@ void handleMenu() {
                 menuOptions.concat("Dist Btwn Wheels");
                 break;
         }
+    } else if (menuValue > 100) {
+        // This is the third level
+        // Shows the whatever information we want
+        switch (menuValue % 10) {
+            case SPEEDOMETER:
+                menuString = "Speedometer";
+                break;
+
+                // Odometer
+            case ODOMETER:
+                menuString = "Odometer";
+                break;
+
+                // Orientation
+            case ORIENTATION:
+                menuString = "Orientation";
+                break;
+
+                // Current Location
+            case CURRENT_LOCATION:
+                menuString = "Current Location";
+                break;
+
+                // Remote Control Message
+            case REMOTE_CONTROL_MESSAGE:
+                menuString = "Remote Control Message";
+                break;
+
+            case WHEEL_DIAMETER:
+                menuString = "Wheel Diameter";
+                break;
+
+                // Distance between two wheels
+            case DISTANCE_BETWEEN_WHEELS:
+                menuString = "Distance Between Two Wheels";
+                break;
+        }
     }
 
     // Display the built menu string
     display.println(menuString);
 
     // Check if we are showing info or in menu
-    if (infoMode == 0) {
+    // If the following if block is true, is a menu
+    // Else is an information screen
+    if (menuValue % 10 == 0) {
         // Display the options
         display.setCursor(0, selectLine(3));
         display.print(menuOptions);
@@ -400,6 +448,45 @@ void handleMenu() {
         // The number on the select line is the same as above
         display.setCursor(0, selectLine(3 + menuSelection));
         display.print('>');
+    } else {
+        // Clear the canvas
+        display.fillRect(0, selectLine(3), SCREEN_WIDTH, SCREEN_HEIGHT - selectLine(3), SSD1306_BLACK);
+        display.setCursor(0, selectLine(3));
+
+        // Show the information of the desired mode
+//        Serial.print("Showing info - mode ");
+//        Serial.println(menuValue % 10);
+        switch (menuValue % 10) {
+            case SPEEDOMETER:
+                display.print(getSpeed());
+                display.println(" meters per hour.");
+                break;
+
+            case ODOMETER:
+                display.print(getOdometer());
+                display.println(" meters traveled.");
+                break;
+
+            case ORIENTATION:
+                //IMU checking
+                mpu.Execute();
+                display.print("X: ");
+                display.println(mpu.GetAngX());
+                display.print("Y: ");
+                display.println(mpu.GetAngY());
+                display.print("Z: ");
+                display.println(mpu.GetAngZ());
+                break;
+
+            case REMOTE_CONTROL_MESSAGE:
+                break;
+
+            case WHEEL_DIAMETER:
+                break;
+
+            case DISTANCE_BETWEEN_WHEELS:
+                break;
+        }
     }
 
     display.display();
@@ -448,53 +535,22 @@ void handleMenuSelection() {
     }
 }
 
+/**
+ * Gets the selection and determines what to do with it
+ * This is the only function allowed to make changes to the selection global variable
+ *
+ * @param selection
+ */
+void processSelection(int selection) {
+    menuValue = selection;
+}
+
 void handleOLED() {
     display.clearDisplay();
 
     display.setTextSize(1);      // Normal 1:1 pixel scale
     display.setTextColor(SSD1306_WHITE); // Draw white text
     display.cp437(true);         // Use full 256 char 'Code Page 437' font
-
-    if (infoMode == 1) {
-        // Clear the canvas
-        display.fillRect(0, selectLine(3), SCREEN_WIDTH, SCREEN_HEIGHT - selectLine(3), SSD1306_BLACK);
-        display.setCursor(0, selectLine(3));
-
-        // Show the information of the desired mode
-//        Serial.print("Showing info - mode ");
-//        Serial.println(menuValue % 10);
-        switch (menuValue % 10) {
-            case SPEEDOMETER:
-                display.print(getSpeed());
-                display.println(" meters per hour.");
-                break;
-
-            case ODOMETER:
-                display.print(getOdometer());
-                display.println(" meters traveled.");
-                break;
-
-            case ORIENTATION:
-                //IMU checking
-                mpu.Execute();
-                display.print("X: ");
-                display.println(mpu.GetAngX());
-                display.print("Y: ");
-                display.println(mpu.GetAngY());
-                display.print("Z: ");
-                display.println(mpu.GetAngZ());
-                break;
-
-            case REMOTE_CONTROL_MESSAGE:
-                break;
-
-            case WHEEL_DIAMETER:
-                break;
-
-            case DISTANCE_BETWEEN_WHEELS:
-                break;
-        }
-    }
 }
 
 /**
@@ -527,13 +583,13 @@ void handleSerialComm() {
         //inputString = Serial.readString();
         if (inputChar == 's') {
             infoMode = 1;
-            menuValue = 111;
+            processSelection(111);
         } else if (inputChar == 'o') {
             infoMode = 1;
-            menuValue = 112;
+            processSelection(112);
         } else if (inputChar == 'r') {
             infoMode = 1;
-            menuValue = 113;
+            processSelection(113);
         } else if (inputChar == 'm') {
             Serial.println("Changing to manual control mode.");
             isAuto = false;
@@ -582,7 +638,7 @@ void handleAsync() {
 
         // Handlers
         if (isAuto) autoMotor();
-        handleMenu();
+        handleMenuInformation();
         handleMenuSelection();
         handleOLED();
         handleSerialComm();
