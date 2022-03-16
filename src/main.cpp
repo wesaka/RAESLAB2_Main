@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <TinyMPU6050.h>
+#include <PID_v1.h>
 
 /*
  * Encoder variables
@@ -19,7 +20,6 @@
 #define M_AIN2 48
 #define M_STBY 47
 
-
 /*
  * Global Variables
 **/
@@ -27,7 +27,6 @@ int lastCounter = 0;
 
 int currentStateCLK;
 int lastStateCLK;
-int infoMode = 0;
 
 /*
  * Timekeeping
@@ -52,6 +51,7 @@ unsigned long timeForRPM = millis();
 #define REMOTE_CONTROL_MESSAGE 5
 #define WHEEL_DIAMETER 6
 #define DISTANCE_BETWEEN_WHEELS 7
+#define CURRENT_STATUS 8
 
 #define SPACE "   "
 
@@ -78,14 +78,31 @@ int encoderCounter = 0; // Just to keep in mind that one revolution is approx 30
 #define M_AIN2 48
 #define M_STBY 47
 
-bool isAuto = false;
 bool isCW = true;
 
 double odometer = 0.0;
-int speed = 1;
+double pwmSpeed = 1;
+double speed = 0.0;
 bool isIncreasing = true;
 
 unsigned long currentRPM;
+
+/*
+ * PID
+ */
+double pidSetpoint, pidInput, pidOutput;
+double Kp = 2, Ki = 5, Kd = 1;
+
+PID pid(&speed, &pwmSpeed, &pidSetpoint, Kp, Ki, Kd, DIRECT);
+
+/*
+ * Control mode variables
+ */
+#define CONTROL_STANDBY 0
+#define CONTROL_AUTO 1
+#define CONTROL_REMOTE 2
+
+int controlMode = CONTROL_STANDBY;
 
 /*
  * OLED Variables
@@ -104,6 +121,12 @@ int JOY_X = A8;
 int JOY_Y = A9;
 
 /*
+ * MPU
+ */
+
+MPU6050 mpu(Wire);
+
+/*
  * Buttons variables
  */
 #define B_1 53
@@ -115,23 +138,50 @@ int JOY_Y = A9;
 #define B_RIGHT 58
 
 /*
+ * Task variables
+ */
+int currentTask = 0;
+String currentCommand = "";
+
+#define TARGET_SPEED 1
+#define TARGET_ODOMETER 2
+
+
+/*
  * Function declarations
  */
 
 void menuForward();
+
 void menuBack();
 
 void getRPM();
+
 double getSpeed();
+
 double getOdometer();
+
 void getEncoderCount();
 
 void handleMenuInformation();
+
 void handleMenuSelection();
+
 void processSelection(int);
+
 void handleOLED();
+
 void handleSerialComm();
+
 void handleAsync();
+
+void autoMotor();
+
+void stopAll();
+
+void targetOdometer(double);
+
+void targetSpeed(double);
 
 /*
  * General functions
@@ -139,36 +189,84 @@ void handleAsync();
 int selectLine(int line) { return line * 8; }
 
 
+/*
+ * Main Arduino functions
+ */
+
+void setup() {
+    Serial.begin(9600);
+
+// Set encoder pins as inputs
+    pinMode(ENCODER_CLK, INPUT);
+    pinMode(ENCODER_DT, INPUT);
+
+    // Set up motor pins
+    pinMode(M_SPEED, OUTPUT);
+    pinMode(M_AIN1, OUTPUT);
+    pinMode(M_AIN2, OUTPUT);
+    pinMode(M_STBY, OUTPUT);
+    digitalWrite(M_STBY, HIGH);
+
+    // Read the initial state of CLK
+    lastStateCLK = digitalRead(ENCODER_CLK);
+
+    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+        Serial.println(F("SSD1306 allocation failed"));
+        for (;;); // Don't proceed, loop forever
+    }
+
+    // Joystick switch needs to have pullup
+    pinMode(B_1, INPUT_PULLUP);
+    pinMode(B_2, INPUT_PULLUP);
+    pinMode(B_3, INPUT_PULLUP);
+    pinMode(B_UP, INPUT_PULLUP);
+    pinMode(B_DOWN, INPUT_PULLUP);
+    pinMode(B_RIGHT, INPUT_PULLUP);
+    pinMode(B_LEFT, INPUT_PULLUP);
+    pinMode(JOY_Y, INPUT);
+    pinMode(JOY_X, INPUT);
+
+    // IMU init
+    mpu.Initialize();
+
+    // PID init
+    pid.SetMode(AUTOMATIC);
+}
+
+void loop() {
+    handleAsync();
+}
+
+
 void menuForward() {
-    int selection = menuValue % 100;
+    int selection = menuValue % ROOT;
     if (selection == 0) {
         // We are in the root
-        processSelection(100 + ((menuSelection + 1) * 10));
+        processSelection(ROOT + ((menuSelection + 1) * 10));
     } else {
         // We are in the second menu
         // Figure out what are the options
-        infoMode = 1;
         switch (selection) {
             case AUTORUN:
                 switch (menuSelection) {
                     // Speedometer
                     case 0:
-                        processSelection(100 + selection + SPEEDOMETER);
+                        processSelection(ROOT + selection + SPEEDOMETER);
                         break;
 
                         // Odometer
                     case 1:
-                        processSelection(100 + selection + ODOMETER);
+                        processSelection(ROOT + selection + ODOMETER);
                         break;
 
                         // Orientation
                     case 2:
-                                                processSelection(100 + selection + ORIENTATION);
+                        processSelection(ROOT + selection + ORIENTATION);
                         break;
 
                         // Current Location
                     case 3:
-                                                processSelection(100 + selection + CURRENT_LOCATION);
+                        processSelection(ROOT + selection + CURRENT_LOCATION);
                         break;
                 }
                 break;
@@ -177,27 +275,27 @@ void menuForward() {
                 switch (menuSelection) {
                     // Speedometer
                     case 0:
-                                                processSelection(100 + selection + SPEEDOMETER);
+                        processSelection(ROOT + selection + SPEEDOMETER);
                         break;
 
                         // Odometer
                     case 1:
-                                                processSelection(100 + selection + ODOMETER);
+                        processSelection(ROOT + selection + ODOMETER);
                         break;
 
                         // Orientation
                     case 2:
-                                                processSelection(100 + selection + ORIENTATION);
+                        processSelection(ROOT + selection + ORIENTATION);
                         break;
 
                         // Current Location
                     case 3:
-                                                processSelection(100 + selection + CURRENT_LOCATION);
+                        processSelection(ROOT + selection + CURRENT_LOCATION);
                         break;
 
                         // Remote Control Message
                     case 4:
-                                                processSelection(100 + selection + REMOTE_CONTROL_MESSAGE);
+                        processSelection(ROOT + selection + REMOTE_CONTROL_MESSAGE);
                         break;
                 }
                 break;
@@ -206,12 +304,16 @@ void menuForward() {
                 switch (menuSelection) {
                     // Wheel Diameter
                     case 0:
-                                                processSelection(100 + selection + WHEEL_DIAMETER);
+                        processSelection(ROOT + selection + WHEEL_DIAMETER);
                         break;
 
                         // Distance between two wheels
                     case 1:
-                                                processSelection(100 + selection + DISTANCE_BETWEEN_WHEELS);
+                        processSelection(ROOT + selection + DISTANCE_BETWEEN_WHEELS);
+                        break;
+
+                    case 2:
+                        processSelection(ROOT + selection + CURRENT_STATUS);
                         break;
                 }
                 break;
@@ -224,26 +326,18 @@ void menuForward() {
 
 void menuBack() {
     // Check what level are we
-    int level = menuValue % 100;
+    int level = menuValue % ROOT;
     if (level > 0) {
         if (level % 10 > 0) {
-            processSelection(100 + ((level / 10) * 10));
+            processSelection(ROOT + ((level / 10) * 10));
         } else {
-            processSelection(100);
+            processSelection(ROOT);
         }
 
         // Don't forget to reset the cursor
         menuSelection = 0;
     }
-
-    // Reset the infoMode to show menus
-    infoMode = 0;
 }
-
-/*
- *  Constructing MPU-6050
- */
-MPU6050 mpu(Wire);
 
 void getRPM() {
     /*
@@ -251,17 +345,20 @@ void getRPM() {
      * Since every 30 the wheel does one revolution, but that's not exact :/
      */
 
-    Serial.println(encoderCounter);
+    //Serial.println(encoderCounter);
 
-    int counterResult;
+    int counterResult = 0;
 
     if (encoderCounter > lastCounter) {
         counterResult = encoderCounter - lastCounter;
-    } else {
+    } else if (encoderCounter < lastCounter) {
         counterResult = lastCounter - encoderCounter;
     }
 
-    if (counterResult >= 30) {
+    if (counterResult == 0) {
+        currentRPM = 0;
+
+    } else if (counterResult >= 30) {
         // 1 revolution have passed
         lastCounter = encoderCounter;
 
@@ -310,42 +407,11 @@ void getEncoderCount() {
     lastStateCLK = currentStateCLK;
 }
 
-void autoMotor() {
-    // Handle the increase in speed automatically
-    int speedStep = isIncreasing ? 1 : -1;
-    speed += speedStep;
-
-    if (speed > 255) {
-        speed = 255;
-        isIncreasing = false;
-        isCW = false;
-    }
-
-    if (speed < 50) {
-        speed = 50;
-        isIncreasing = true;
-        isCW = true;
-    }
-
-    if (isCW) {
-        digitalWrite(M_AIN1, HIGH);
-        digitalWrite(M_AIN2, LOW);
-    } else {
-        digitalWrite(M_AIN1, LOW);
-        digitalWrite(M_AIN2, HIGH);
-    }
-
-    analogWrite(M_SPEED, speed);
-
-//    Serial.print("Current speed: ");
-//    Serial.println(speed);
-}
-
 void handleMenuInformation() {
     display.setCursor(0, 0);     // Start at top-left corner
 
     // Get where in the menu tree we are
-    int remainder = menuValue % 100;
+    int remainder = menuValue % ROOT;
     if (remainder == 0 || remainder % 10 == 0) menuString = "Mode";
 
     // Initiate the default menu options
@@ -356,7 +422,7 @@ void handleMenuInformation() {
     menuOptions.concat(SPACE);
     menuOptions.concat("System Info");
 
-    if (menuValue > 100 && remainder % 10 == 0) {
+    if (menuValue > ROOT && remainder % 10 == 0) {
         // Second level of the menu
         switch (remainder) {
             case AUTORUN:
@@ -391,10 +457,12 @@ void handleMenuInformation() {
                 menuOptions = SPACE;
                 menuOptions.concat("Wheel Diameter\n");
                 menuOptions.concat(SPACE);
-                menuOptions.concat("Dist Btwn Wheels");
+                menuOptions.concat("Dist Btwn Wheels\n");
+                menuOptions.concat(SPACE);
+                menuOptions.concat("Current Status");
                 break;
         }
-    } else if (menuValue > 100) {
+    } else if (menuValue > ROOT) {
         // This is the third level
         // Shows the whatever information we want
         switch (menuValue % 10) {
@@ -430,6 +498,10 @@ void handleMenuInformation() {
             case DISTANCE_BETWEEN_WHEELS:
                 menuString = "Distance Between Two Wheels";
                 break;
+
+            case CURRENT_STATUS:
+                menuString = "Current Status";
+                break;
         }
     }
 
@@ -458,12 +530,13 @@ void handleMenuInformation() {
 //        Serial.println(menuValue % 10);
         switch (menuValue % 10) {
             case SPEEDOMETER:
-                display.print(getSpeed());
+                // TODO maybe I broke something here
+                display.print(speed);
                 display.println(" meters per hour.");
                 break;
 
             case ODOMETER:
-                display.print(getOdometer());
+                display.print(odometer);
                 display.println(" meters traveled.");
                 break;
 
@@ -486,6 +559,28 @@ void handleMenuInformation() {
 
             case DISTANCE_BETWEEN_WHEELS:
                 break;
+
+            case CURRENT_STATUS:
+                mpu.Execute();
+                display.print("Speed: ");
+                display.println(speed);
+                display.print("Odometer: ");
+                display.println(speed);
+                display.print("X:");
+                display.print((int)mpu.GetAngX());
+                display.print("|Y:");
+                display.print((int)mpu.GetAngY());
+                display.print("|Z:");
+                display.println((int)mpu.GetAngZ());
+                display.print("Current PWM: ");
+                display.println(pwmSpeed);
+                display.print("P:");
+                display.print(Kp);
+                display.print("|I:");
+                display.print(Ki);
+                display.print("|D:");
+                display.println(Kd);
+                break;
         }
     }
 
@@ -501,7 +596,7 @@ void handleMenuSelection() {
 
     // Go down on menu
     if (digitalRead(B_DOWN) == LOW) {
-        int selection = (((menuValue % 100) / 10) * 10);
+        int selection = (((menuValue % ROOT) / 10) * 10);
 
         // Default value for root menu
         int maxValue = 2;
@@ -516,7 +611,7 @@ void handleMenuSelection() {
                 break;
 
             case INFO:
-                maxValue = 1;
+                maxValue = 2;
                 break;
         }
 
@@ -543,6 +638,21 @@ void handleMenuSelection() {
  */
 void processSelection(int selection) {
     menuValue = selection;
+
+    /*
+     * Process any behavior change that is not associated with the OLED display here
+     * The OLED display automatically gets the menuValue and displays the right thing
+     * Defined in the handleMenuInformation function
+     */
+
+    // Check if autorun or remote control is currently selected
+    if (menuValue - ROOT - (menuValue % 10) == AUTORUN) {
+        controlMode = CONTROL_AUTO;
+    } else if (menuValue - ROOT - (menuValue % 10) == REMOTE) {
+        controlMode = CONTROL_REMOTE;
+    } else {
+        controlMode = CONTROL_STANDBY;
+    }
 }
 
 void handleOLED() {
@@ -551,6 +661,33 @@ void handleOLED() {
     display.setTextSize(1);      // Normal 1:1 pixel scale
     display.setTextColor(SSD1306_WHITE); // Draw white text
     display.cp437(true);         // Use full 256 char 'Code Page 437' font
+}
+
+String receiveSerialString() {
+    const int inputSize = 50;
+    char inputArray[inputSize];
+    static byte ndx = 0;
+    char endMarker = '\n';
+    char rc;
+
+    // if (Serial.available() > 0) {
+    while (Serial.available() > 0) {
+        rc = Serial.read();
+
+        if (rc != endMarker) {
+            inputArray[ndx] = rc;
+            ndx++;
+            if (ndx >= inputSize) {
+                ndx = inputSize - 1;
+            }
+        }
+        else {
+            inputArray[ndx] = '\0'; // terminate the string
+            ndx = 0;
+        }
+    }
+
+    return {inputArray};
 }
 
 /**
@@ -563,8 +700,8 @@ void handleOLED() {
  * a: for automatic - increases and decreases speed automatically
  * m: for manual - still have to implement it
  *
- * s: for seeing the speed in the OLED
- * o: for seeing odometer in OLED
+ * s: for setting the target speed
+ * o: for setting the target odometer reading
  * r: to see orientation stats in OLED
  * i: to get that information in serial monitor
  */
@@ -577,30 +714,31 @@ void handleSerialComm() {
     char inputChar;
 
     if (Serial.available() > 0) {
-        inputChar = Serial.read();
+        //inputChar = Serial.read();
 
+        String option = receiveSerialString();
+
+        Serial.print("Received string: ");
+        Serial.println(option);
+
+        currentCommand = option;
 
         //inputString = Serial.readString();
-        if (inputChar == 's') {
-            infoMode = 1;
-            processSelection(111);
-        } else if (inputChar == 'o') {
-            infoMode = 1;
-            processSelection(112);
-        } else if (inputChar == 'r') {
-            infoMode = 1;
-            processSelection(113);
-        } else if (inputChar == 'm') {
-            Serial.println("Changing to manual control mode.");
-            isAuto = false;
-        } else if (inputChar == 'a') {
-            Serial.println("Changing to auto control mode.");
-            isAuto = true;
-        } else if (inputChar == 'i') {
+        if(option.startsWith("odom")) {
+            currentTask = TARGET_ODOMETER;
+        } else if (option.startsWith("speed")) {
+            currentTask = TARGET_SPEED;
+        } else if (option.startsWith("P")) {
+            Kp = option.substring(2).toDouble();
+        } else if (option.startsWith("I")) {
+            Ki = option.substring(2).toDouble();
+        } else if (option.startsWith("D")) {
+            Kd = option.substring(2).toDouble();
+        } else if (option.startsWith("info")) {
             Serial.print("Current RPM: ");
             Serial.print(currentRPM);
             Serial.print(" | Current PWM: ");
-            Serial.print(speed);
+            Serial.print(pwmSpeed);
             Serial.print(" | Current speed (meters/minute): ");
             Serial.print(getSpeed());
             Serial.print(" | Current odometer reading :");
@@ -615,73 +753,138 @@ void handleSerialComm() {
             Serial.print("  ");
             Serial.print(mpu.GetAngZ());
             Serial.println("]");
+        } else {
+            currentCommand = "";
+            currentTask = 0;
         }
     }
 }
 
 unsigned long hundredMillis = millis();
 unsigned long oneMillis = millis();
+unsigned long tenMicros = micros();
 
 void handleAsync() {
+    // Doing 10 micros for encoder
+    if (micros() > tenMicros + 10) {
+        tenMicros = micros();
+        getEncoderCount();
+    }
+
     if (millis() > oneMillis + 1) {
         oneMillis = millis();
 
-        getEncoderCount();
         getRPM();
     }
 
 
-    if (millis() > hundredMillis + 100) {
+    if (millis() > hundredMillis + ROOT) {
         // Reset the global time variable to reflect now
         hundredMillis = millis();
         //Serial.println(hundredMillis);
 
         // Handlers
-        if (isAuto) autoMotor();
         handleMenuInformation();
         handleMenuSelection();
         handleOLED();
         handleSerialComm();
+
+        switch (controlMode) {
+            case CONTROL_AUTO:
+                autoMotor();
+                break;
+
+            case CONTROL_REMOTE:
+                switch (currentTask) {
+                    case TARGET_ODOMETER:
+                        targetOdometer(currentCommand.substring(5).toDouble());
+                        break;
+
+                    case TARGET_SPEED:
+                        targetSpeed(currentCommand.substring(6).toDouble());
+                        break;
+                }
+                break;
+
+            default:
+                stopAll();
+                break;
+        }
     }
 }
 
-void setup() {
-    Serial.begin(9600);
+/*
+ * Actuators
+ */
 
-// Set encoder pins as inputs
-    pinMode(ENCODER_CLK, INPUT);
-    pinMode(ENCODER_DT, INPUT);
+void autoMotor() {
+    // Handle the increase in speed automatically
+    int speedStep = isIncreasing ? 1 : -1;
+    pwmSpeed += speedStep;
 
-    // Set up motor pins
-    pinMode(M_SPEED, OUTPUT);
-    pinMode(M_AIN1, OUTPUT);
-    pinMode(M_AIN2, OUTPUT);
-    pinMode(M_STBY, OUTPUT);
+    if (pwmSpeed > 255) {
+        pwmSpeed = 255;
+        isIncreasing = false;
+        isCW = false;
+    }
+
+    if (pwmSpeed < 50) {
+        pwmSpeed = 50;
+        isIncreasing = true;
+        isCW = true;
+    }
+
     digitalWrite(M_STBY, HIGH);
 
-    // Read the initial state of CLK
-    lastStateCLK = digitalRead(ENCODER_CLK);
-
-    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-        Serial.println(F("SSD1306 allocation failed"));
-        for (;;); // Don't proceed, loop forever
+    if (isCW) {
+        digitalWrite(M_AIN1, HIGH);
+        digitalWrite(M_AIN2, LOW);
+    } else {
+        digitalWrite(M_AIN1, LOW);
+        digitalWrite(M_AIN2, HIGH);
     }
 
-    // Joystick switch needs to have pullup
-    pinMode(B_1, INPUT_PULLUP);
-    pinMode(B_2, INPUT_PULLUP);
-    pinMode(B_3, INPUT_PULLUP);
-    pinMode(B_UP, INPUT_PULLUP);
-    pinMode(B_DOWN, INPUT_PULLUP);
-    pinMode(B_RIGHT, INPUT_PULLUP);
-    pinMode(B_LEFT, INPUT_PULLUP);
-    pinMode(JOY_Y, INPUT);
-    pinMode(JOY_X, INPUT);
+    analogWrite(M_SPEED, pwmSpeed);
 
-    // IMU init
-    mpu.Initialize();
+//    Serial.print("Current speed: ");
+//    Serial.println(speed);
 }
 
-void loop() {
-    handleAsync();
+void stopAll() {
+    digitalWrite(M_STBY, LOW);
+}
+
+/**
+ * This functions controls the wheel to run at full speed until reaches the desired odometer
+ *
+ * @param odometerReading The target total distance traveled
+ */
+void targetOdometer(double odometerReading) {
+    if (odometerReading <= odometer) {
+        digitalWrite(M_STBY, LOW);
+    } else {
+        digitalWrite(M_STBY, HIGH);
+        digitalWrite(M_AIN1, HIGH);
+        digitalWrite(M_AIN2, LOW);
+        analogWrite(M_SPEED, 255);
+    }
+}
+
+/**
+ * The function that when called sets the robot to run at a certain speed
+ *
+ * @param speedReading Accepts the speed value to which you want the robot to maintain
+ */
+void targetSpeed(double speedReading) {
+    digitalWrite(M_STBY, HIGH);
+    digitalWrite(M_AIN1, HIGH);
+    digitalWrite(M_AIN2, LOW);
+
+    // Ramp up the speed until we hit the desired value
+    // Use PID for that
+    pidSetpoint = speedReading;
+
+    speed = getSpeed();
+    pid.Compute();
+    analogWrite(M_SPEED, pwmSpeed);
 }
